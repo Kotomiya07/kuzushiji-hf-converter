@@ -1,0 +1,12 @@
+[project]
+name = "kotenseki-dataset"
+version = "0.1.0"
+description = "Kuzushiji dataset converter for Hugging Face Datasets"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "datasets>=4.5.0",
+    "huggingface-hub>=1.4.1",
+    "pandas>=3.0.0",
+    "pillow>=12.1.0",
+]
