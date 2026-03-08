@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 import pandas as pd
 from datasets import Dataset, Features, Image, Sequence, Value
-from huggingface_hub import DatasetCard, DatasetCardData
+from huggingface_hub import DatasetCard, DatasetCardData, get_token
 from PIL import Image as PILImage
 
 
@@ -684,7 +684,7 @@ def main() -> None:
         return
 
     # トークン取得
-    hub_token = args.hub_token or os.environ.get("HF_TOKEN")
+    hub_token = args.hub_token or os.environ.get("HF_TOKEN") or get_token()
 
     print(f"Scanning raw directory: {raw_dir}")
     print(f"Bbox format: {bbox_format}")

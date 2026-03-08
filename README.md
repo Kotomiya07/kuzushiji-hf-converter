@@ -23,12 +23,11 @@ uv run python convert_dataset.py --bbox-format yolo --raw-dir ./raw --column-ann
 ### Hugging Face Hubへのアップロード
 
 ```bash
-# HF_TOKEN環境変数を設定
-export HF_TOKEN=your_token_here
-
 # Hubにプッシュ
 uv run python convert_dataset.py --bbox-format coco --push-to-hub --hub-username your_username
 ```
+
+`hf auth login` 済みなら、`HF_TOKEN` を明示しなくてもローカル保存済みトークンを自動利用します。明示したい場合は `--hub-token` または `HF_TOKEN` も使えます。
 
 ### テスト実行（1ディレクトリのみ）
 
@@ -47,7 +46,7 @@ uv run python convert_dataset.py --bbox-format coco --raw-dir ./raw --dry-run
 | `--column-annotations-dir` | 列アノテーションCSVの親ディレクトリ | ./output |
 | `--segment-annotations-dir` | セグメントアノテーションCSVの親ディレクトリ | ./output_seg |
 | `--push-to-hub` | Hugging Face Hubにプッシュ | False |
-| `--hub-token` | Hubトークン（HF_TOKEN環境変数も可） | None |
+| `--hub-token` | Hubトークン（未指定時は HF_TOKEN → `hf auth login` 保存トークンの順で参照） | None |
 | `--hub-username` | Hubユーザー名/組織名 | None |
 | `--max-shard-size` | Parquetシャードサイズ | 500MB |
 | `--dry-run` | 最初の1ディレクトリのみ処理 | False |
