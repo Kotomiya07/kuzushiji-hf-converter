@@ -28,6 +28,7 @@ uv run python convert_dataset.py --bbox-format coco --push-to-hub --hub-username
 ```
 
 `hf auth login` 済みなら、`HF_TOKEN` を明示しなくてもローカル保存済みトークンを自動利用します。明示したい場合は `--hub-token` または `HF_TOKEN` も使えます。
+`--hub-username` を省略した場合は、ログイン中ユーザー名を自動解決して `{username}/{dataset_name}` 形式で push します。
 
 ### テスト実行（1ディレクトリのみ）
 

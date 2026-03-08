@@ -21,7 +21,7 @@ from typing import Any, Literal
 
 import pandas as pd
 from datasets import Dataset, Features, Image, Sequence, Value
-from huggingface_hub import DatasetCard, DatasetCardData, get_token
+from huggingface_hub import DatasetCard, DatasetCardData, HfApi, get_token
 from PIL import Image as PILImage
 
 
@@ -462,6 +462,7 @@ def save_label_mapping(
 
 
 def create_dataset_card(
+    repo_id: str,
     bbox_format: BboxFormat,
     num_images: int,
     num_books: int,
@@ -540,7 +541,7 @@ with character-level bounding box annotations for Kuzushiji (cursive Japanese) r
 from datasets import load_dataset
 import json
 
-dataset = load_dataset("your-username/kuzushiji-dataset-{bbox_format}")
+dataset = load_dataset("{repo_id}")
 
 # Access first example
 example = dataset["train"][0]
@@ -551,7 +552,7 @@ print(f"Number of characters: {{len(example['objects']['bbox'])}}")
 from huggingface_hub import hf_hub_download
 
 label2id_path = hf_hub_download(
-    repo_id="your-username/kuzushiji-dataset-{bbox_format}",
+    repo_id="{repo_id}",
     filename="label2id.json",
     repo_type="dataset"
 )
@@ -598,6 +599,21 @@ English:
 Data provided by: ROIS-DS Center for Open Data in the Humanities (人文学オープンデータ共同利用センター)
 """
     return DatasetCard(content)
+
+
+def resolve_repo_id(
+    dataset_name: str,
+    hub_username: str | None,
+    hub_token: str | None,
+) -> str:
+    """完全修飾の repo_id を返す."""
+    if hub_username:
+        return f"{hub_username}/{dataset_name}"
+
+    api = HfApi(token=hub_token)
+    user_info = api.whoami(token=hub_token)
+    username = str(user_info["name"])
+    return f"{username}/{dataset_name}"
 
 
 def main() -> None:
@@ -739,11 +755,7 @@ def main() -> None:
     # Hubにプッシュ
     if args.push_to_hub:
         dataset_name = f"{args.dataset_name_prefix}-{bbox_format}"
-
-        if args.hub_username:
-            repo_id = f"{args.hub_username}/{dataset_name}"
-        else:
-            repo_id = dataset_name
+        repo_id = resolve_repo_id(dataset_name, args.hub_username, hub_token)
 
         print(f"Pushing to Hub: {repo_id}")
         dataset.push_to_hub(
@@ -753,9 +765,7 @@ def main() -> None:
         )
 
         # label2id.json と id2label.json をHubにアップロード
-        from huggingface_hub import HfApi
-
-        api = HfApi()
+        api = HfApi(token=hub_token)
         print("Uploading label mappings...")
 
         # label2id.json
@@ -781,6 +791,7 @@ def main() -> None:
         # データセットカードをアップロード
         print("Uploading dataset card...")
         card = create_dataset_card(
+            repo_id=repo_id,
             bbox_format=bbox_format,
             num_images=len(all_annotations),
             num_books=book_count,
