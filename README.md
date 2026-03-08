@@ -1,6 +1,6 @@
 # kotenseki-dataset
 
-Hugging Face Datasets形式でくずし字画像とアノテーション（バウンディングボックス）を提供するスクリプト。
+Hugging Face Datasets形式でくずし字画像とアノテーション（文字 bbox / 列 bbox / セグメント bbox）を提供するスクリプト。
 
 ## セットアップ
 
@@ -14,10 +14,10 @@ uv sync
 
 ```bash
 # COCO形式（デフォルト）
-uv run python convert_dataset.py --bbox-format coco --raw-dir ./raw
+uv run python convert_dataset.py --bbox-format coco --raw-dir ./raw --column-annotations-dir ./output --segment-annotations-dir ./output_seg
 
 # YOLO形式（正規化済み）
-uv run python convert_dataset.py --bbox-format yolo --raw-dir ./raw
+uv run python convert_dataset.py --bbox-format yolo --raw-dir ./raw --column-annotations-dir ./output --segment-annotations-dir ./output_seg
 ```
 
 ### Hugging Face Hubへのアップロード
@@ -44,6 +44,8 @@ uv run python convert_dataset.py --bbox-format coco --raw-dir ./raw --dry-run
 | `--dataset-name-prefix` | データセット名のプレフィックス | kuzushiji-dataset |
 | `--raw-dir` | 生データのディレクトリ | ./raw |
 | `--output-dir` | 出力ディレクトリ | ./output |
+| `--column-annotations-dir` | 列アノテーションCSVの親ディレクトリ | ./output |
+| `--segment-annotations-dir` | セグメントアノテーションCSVの親ディレクトリ | ./output_seg |
 | `--push-to-hub` | Hugging Face Hubにプッシュ | False |
 | `--hub-token` | Hubトークン（HF_TOKEN環境変数も可） | None |
 | `--hub-username` | Hubユーザー名/組織名 | None |
@@ -71,7 +73,18 @@ features = Features({
         "category": Sequence(Value("string")),      # Unicode文字列（例: U+3042）
         "category_id": Sequence(Value("int32")),    # カテゴリID
         "char": Sequence(Value("string")),          # 実際の文字（例: あ）
-    }
+    },
+    "columns": {
+        "bbox": Sequence(Sequence(Value("float32"), length=4)),
+        "column_id": Sequence(Value("string")),
+        "char_ids": Sequence(Sequence(Value("string"))),
+        "segment_id": Sequence(Value("string")),
+    },
+    "segments": {
+        "bbox": Sequence(Sequence(Value("float32"), length=4)),
+        "segment_id": Sequence(Value("string")),
+        "column_ids": Sequence(Sequence(Value("string"))),
+    },
 })
 ```
 
@@ -106,6 +119,14 @@ raw/
 │   ├── {ID}_coordinate.csv  # Unicode, Image, X, Y, Block ID, Char ID, Width, Height
 │   ├── images/              # ページ画像 (*.jpg)
 │   └── characters/          # 切り出し文字画像（本スクリプトでは未使用）
+
+output/
+└── {ID}/
+    └── column_annotation.csv
+
+output_seg/
+└── {ID}/
+    └── column_annotation.csv
 ```
 
 ## ライセンス
