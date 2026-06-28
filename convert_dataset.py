@@ -30,6 +30,12 @@ from PIL import Image as PILImage
 BboxFormat = Literal["coco", "yolo"]
 ExportFormat = Literal["hf", "roboflow"]
 DatasetType = Literal["page", "character", "both"]
+PuaMetadata = dict[str, dict[str, str]]
+PUA_RANGES = (
+    (0xE000, 0xF8FF),
+    (0xF0000, 0xFFFFD),
+    (0x100000, 0x10FFFD),
+)
 
 
 @dataclass
@@ -43,6 +49,10 @@ class CharAnnotation:
     height: int
     block_id: str
     char_id: str
+    is_pua: bool = False
+    pua_code: str = ""
+    pua_reading: str = ""
+    pua_memo: str = ""
 
 
 @dataclass
@@ -84,6 +94,96 @@ def parse_unicode_to_char(unicode_str: str) -> str:
         code_point = int(unicode_str[2:], 16)
         return chr(code_point)
     return unicode_str
+
+
+def unicode_codepoint(unicode_str: str) -> int | None:
+    """U+XXXX形式の文字列をコードポイントに変換する."""
+    if not unicode_str.startswith("U+"):
+        return None
+    try:
+        return int(unicode_str[2:], 16)
+    except ValueError:
+        return None
+
+
+def is_pua_unicode(unicode_str: str) -> bool:
+    """Unicode文字列が私用領域のコードポイントか判定する."""
+    code_point = unicode_codepoint(unicode_str)
+    if code_point is None:
+        return False
+    return any(start <= code_point <= end for start, end in PUA_RANGES)
+
+
+def build_pua_fields(unicode_str: str, pua_metadata: PuaMetadata) -> dict[str, str | bool]:
+    """Unicode文字列からPUA補助フィールドを作る."""
+    if not is_pua_unicode(unicode_str):
+        return {
+            "is_pua": False,
+            "pua_code": "",
+            "pua_reading": "",
+            "pua_memo": "",
+        }
+
+    metadata = pua_metadata.get(unicode_str, {})
+    return {
+        "is_pua": True,
+        "pua_code": unicode_str,
+        "pua_reading": metadata.get("reading", ""),
+        "pua_memo": metadata.get("memo", ""),
+    }
+
+
+def load_pua_metadata(metadata_path: Path | None) -> PuaMetadata:
+    """アノテーターの pua_characters.json から読み・メモを読み込む."""
+    if metadata_path is None or not metadata_path.exists():
+        return {}
+
+    with metadata_path.open("r", encoding="utf-8") as f:
+        data = json.load(f)
+
+    characters = data.get("pua_characters", {})
+    if not isinstance(characters, dict):
+        return {}
+
+    metadata: PuaMetadata = {}
+    for code, info in characters.items():
+        if not isinstance(code, str) or not isinstance(info, dict):
+            continue
+        metadata[code] = {
+            "reading": str(info.get("reading", "")),
+            "memo": str(info.get("memo", "")),
+        }
+    return metadata
+
+
+def load_pua_metadata_files(metadata_paths: list[Path]) -> PuaMetadata:
+    """複数のPUAメタデータファイルを読み込んでマージする."""
+    merged: PuaMetadata = {}
+    for metadata_path in metadata_paths:
+        merged.update(load_pua_metadata(metadata_path))
+    return merged
+
+
+def resolve_pua_metadata_paths(raw_dir: Path, metadata_path: Path | None) -> list[Path]:
+    """PUAメタデータファイルのパス候補を解決する."""
+    if metadata_path is not None:
+        resolved = metadata_path.resolve()
+        return [resolved] if resolved.exists() else []
+
+    candidates = [
+        raw_dir.parent.parent / "kotenseki-annotator-web" / "pua_characters.json",
+        raw_dir / "pua_characters.json",
+        raw_dir.parent / "pua_characters.json",
+    ]
+    resolved_paths: list[Path] = []
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate.exists():
+            resolved = candidate.resolve()
+            if resolved not in seen:
+                resolved_paths.append(resolved)
+                seen.add(resolved)
+    return resolved_paths
 
 
 def convert_bbox(
@@ -285,9 +385,11 @@ def load_annotations(
     bbox_format: BboxFormat,
     column_dir: Path | None,
     segment_dir: Path | None,
+    pua_metadata: PuaMetadata | None = None,
 ) -> list[ImageAnnotation]:
     """CSVファイルからアノテーションを読み込む."""
     df = pd.read_csv(csv_path)
+    pua_metadata = pua_metadata or {}
     image_sizes: dict[str, tuple[int, int]] = {}
     for image_name in sorted({str(value) for value in df["Image"].dropna().tolist()}):
         image_path = images_dir / f"{image_name}.jpg"
@@ -330,6 +432,7 @@ def load_annotations(
                 segments=[],
             )
 
+        pua_fields = build_pua_fields(str(row["Unicode"]), pua_metadata)
         char_ann = CharAnnotation(
             unicode=row["Unicode"],
             x=int(row["X"]),
@@ -338,6 +441,10 @@ def load_annotations(
             height=int(row["Height"]),
             block_id=row["Block ID"],
             char_id=row["Char ID"],
+            is_pua=bool(pua_fields["is_pua"]),
+            pua_code=str(pua_fields["pua_code"]),
+            pua_reading=str(pua_fields["pua_reading"]),
+            pua_memo=str(pua_fields["pua_memo"]),
         )
         image_annotations[image_name].characters.append(char_ann)
 
@@ -382,6 +489,10 @@ def generate_dataset_records(
             "bbox": [],
             "category": [],
             "category_id": [],
+            "is_pua": [],
+            "pua_code": [],
+            "pua_reading": [],
+            "pua_memo": [],
             "char": [],
         }
         columns = {
@@ -409,6 +520,10 @@ def generate_dataset_records(
             objects["bbox"].append(bbox)
             objects["category"].append(char.unicode)
             objects["category_id"].append(label2id[char.unicode])
+            objects["is_pua"].append(char.is_pua)
+            objects["pua_code"].append(char.pua_code)
+            objects["pua_reading"].append(char.pua_reading)
+            objects["pua_memo"].append(char.pua_memo)
             objects["char"].append(parse_unicode_to_char(char.unicode))
 
         for column in ann.columns:
@@ -489,6 +604,10 @@ def generate_character_dataset_records(
                     "block_id": str(char.block_id),
                     "category": char.unicode,
                     "category_id": label2id[char.unicode],
+                    "is_pua": char.is_pua,
+                    "pua_code": char.pua_code,
+                    "pua_reading": char.pua_reading,
+                    "pua_memo": char.pua_memo,
                     "char": parse_unicode_to_char(char.unicode),
                     "bbox": [char.x, char.y, char.width, char.height],
                     "crop_bbox": [left, top, crop_width, crop_height],
@@ -510,6 +629,10 @@ def create_dataset_features() -> Features:
                 "bbox": Sequence(Sequence(Value("float32"), length=4)),
                 "category": Sequence(Value("string")),
                 "category_id": Sequence(Value("int32")),
+                "is_pua": Sequence(Value("bool")),
+                "pua_code": Sequence(Value("string")),
+                "pua_reading": Sequence(Value("string")),
+                "pua_memo": Sequence(Value("string")),
                 "char": Sequence(Value("string")),
             },
             "columns": {
@@ -538,6 +661,10 @@ def create_character_dataset_features() -> Features:
             "block_id": Value("string"),
             "category": Value("string"),
             "category_id": Value("int32"),
+            "is_pua": Value("bool"),
+            "pua_code": Value("string"),
+            "pua_reading": Value("string"),
+            "pua_memo": Value("string"),
             "char": Value("string"),
             "bbox": Sequence(Value("int32"), length=4),
             "crop_bbox": Sequence(Value("int32"), length=4),
@@ -566,6 +693,19 @@ def save_label_mapping(
         json.dump(id2label_str_keys, f, ensure_ascii=False, indent=2)
 
     print(f"Saved label mappings to {output_dir}")
+
+
+def save_pua_metadata(pua_metadata: PuaMetadata, output_dir: Path) -> Path | None:
+    """PUAメタデータをJSONファイルに保存する."""
+    if not pua_metadata:
+        return None
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = output_dir / "pua_metadata.json"
+    with metadata_path.open("w", encoding="utf-8") as f:
+        json.dump(pua_metadata, f, ensure_ascii=False, indent=2)
+    print(f"Saved PUA metadata to {metadata_path}")
+    return metadata_path
 
 
 def format_yolo_label_line(bbox: list[float]) -> str:
@@ -682,6 +822,10 @@ with character-level bounding box annotations for Kuzushiji (cursive Japanese) r
         "bbox": List[List[float]],       # Bounding boxes ({bbox_descriptions[bbox_format]})
         "category": List[str],           # Unicode strings (e.g., U+3042)
         "category_id": List[int],        # Category IDs
+        "is_pua": List[bool],            # Whether category is a Private Use Area code
+        "pua_code": List[str],           # PUA code strings if applicable
+        "pua_reading": List[str],        # PUA readings from pua_metadata.json if available
+        "pua_memo": List[str],           # PUA notes from pua_metadata.json if available
         "char": List[str],               # Actual characters (e.g., あ)
     }},
     "columns": {{
@@ -737,6 +881,7 @@ print(f"Number of categories: {{len(label2id)}}")
 This dataset includes the following mapping files:
 - `label2id.json`: Unicode string (e.g., "U+3042") to category ID mapping
 - `id2label.json`: Category ID to Unicode string mapping
+- `pua_metadata.json`: PUA code to reading / memo mapping when annotator metadata is available
 
 ## License
 
@@ -813,6 +958,10 @@ This dataset contains character crops generated directly from page images using 
     "block_id": str,                 # Block ID
     "category": str,                 # Unicode string (e.g., U+3042)
     "category_id": int,              # Category ID
+    "is_pua": bool,                  # Whether category is a Private Use Area code
+    "pua_code": str,                 # PUA code string if applicable
+    "pua_reading": str,              # PUA reading from pua_metadata.json if available
+    "pua_memo": str,                 # PUA note from pua_metadata.json if available
     "char": str,                     # Actual character
     "bbox": List[int],               # Original bbox on the source page [x, y, w, h]
     "crop_bbox": List[int],          # Clamped bbox used for cropping [x, y, w, h]
@@ -906,6 +1055,12 @@ def main() -> None:
         help="Directory containing per-book column_annotation.csv files for segments",
     )
     parser.add_argument(
+        "--pua-metadata-path",
+        type=Path,
+        default=None,
+        help="Path to annotator pua_characters.json for PUA reading/memo metadata",
+    )
+    parser.add_argument(
         "--push-to-hub",
         action="store_true",
         help="Push dataset to Hugging Face Hub",
@@ -943,6 +1098,8 @@ def main() -> None:
     output_dir: Path = args.output_dir.resolve()
     column_annotations_dir = args.column_annotations_dir.resolve()
     segment_annotations_dir = args.segment_annotations_dir.resolve()
+    pua_metadata_paths = resolve_pua_metadata_paths(raw_dir, args.pua_metadata_path)
+    pua_metadata = load_pua_metadata_files(pua_metadata_paths)
 
     if export_format == "roboflow" and args.push_to_hub:
         msg = "--push-to-hub は --export-format roboflow と同時に使用できません"
@@ -962,6 +1119,12 @@ def main() -> None:
     print(f"Export format: {export_format}")
     print(f"Dataset type: {dataset_type}")
     print(f"Bbox format: {bbox_format}")
+    if pua_metadata_paths:
+        print(f"PUA metadata: {len(pua_metadata)} entries from:")
+        for metadata_path in pua_metadata_paths:
+            print(f"  - {metadata_path}")
+    else:
+        print("PUA metadata: not found")
 
     # 全アノテーションを収集
     all_annotations: list[ImageAnnotation] = []
@@ -976,6 +1139,7 @@ def main() -> None:
             bbox_format,
             column_annotations_dir,
             segment_annotations_dir,
+            pua_metadata,
         )
         all_annotations.extend(annotations)
         book_count += 1
@@ -1005,6 +1169,7 @@ def main() -> None:
 
     # ラベルマッピング保存
     save_label_mapping(label2id, id2label, output_dir)
+    pua_metadata_output_path = save_pua_metadata(pua_metadata, output_dir)
 
     # データセット作成（ジェネレータを使用してメモリ効率化）
     dataset: Dataset | None = None
@@ -1104,6 +1269,24 @@ def main() -> None:
                 repo_type="dataset",
                 token=hub_token,
             )
+
+        if pua_metadata_output_path is not None:
+            if repo_id is not None:
+                api.upload_file(
+                    path_or_fileobj=str(pua_metadata_output_path),
+                    path_in_repo="pua_metadata.json",
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    token=hub_token,
+                )
+            if character_repo_id is not None:
+                api.upload_file(
+                    path_or_fileobj=str(pua_metadata_output_path),
+                    path_in_repo="pua_metadata.json",
+                    repo_id=character_repo_id,
+                    repo_type="dataset",
+                    token=hub_token,
+                )
 
         # データセットカードをアップロード
         print("Uploading dataset card...")

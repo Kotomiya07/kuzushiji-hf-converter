@@ -161,6 +161,122 @@ def test_generate_dataset_records_includes_columns_and_segments(tmp_path: Path) 
     assert records[0]["segments"]["segment_id"] == ["SEG0001"]
 
 
+def test_load_annotations_derives_pua_info_from_unicode_column(tmp_path: Path) -> None:
+    book_id = "book1"
+    images_dir = tmp_path / "raw" / book_id / "images"
+    images_dir.mkdir(parents=True)
+    image_path = images_dir / "page_001.jpg"
+    PILImage.new("RGB", (20, 20), color="white").save(image_path)
+
+    csv_path = tmp_path / "raw" / book_id / f"{book_id}_coordinate.csv"
+    pd.DataFrame(
+        [
+            {
+                "Image": "page_001",
+                "Unicode": "U+E000",
+                "X": 2,
+                "Y": 3,
+                "Width": 4,
+                "Height": 5,
+                "Char ID": "C0001",
+                "Block ID": "",
+            }
+        ]
+    ).to_csv(csv_path, index=False)
+    pua_metadata = {
+        "U+E000": {
+            "reading": "き",
+            "memo": "竹かんむりに車へん",
+        }
+    }
+
+    annotations = convert_dataset.load_annotations(
+        csv_path,
+        images_dir,
+        book_id,
+        "coco",
+        None,
+        None,
+        pua_metadata,
+    )
+
+    char = annotations[0].characters[0]
+    assert char.is_pua is True
+    assert char.pua_code == "U+E000"
+    assert char.pua_reading == "き"
+    assert char.pua_memo == "竹かんむりに車へん"
+
+
+def test_load_pua_metadata_reads_annotator_json(tmp_path: Path) -> None:
+    metadata_path = tmp_path / "pua_characters.json"
+    metadata_path.write_text(
+        """
+{
+  "pua_characters": {
+    "U+E000": {
+      "reading": "き",
+      "memo": "竹かんむりに車へん",
+      "usage_count": 1
+    }
+  }
+}
+""".strip(),
+        encoding="utf-8",
+    )
+
+    metadata = convert_dataset.load_pua_metadata(metadata_path)
+
+    assert metadata == {
+        "U+E000": {
+            "reading": "き",
+            "memo": "竹かんむりに車へん",
+        }
+    }
+
+
+def test_generate_dataset_records_includes_pua_fields(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.jpg"
+    image_path.write_bytes(b"fake-image")
+
+    annotation = convert_dataset.ImageAnnotation(
+        image_id="page_001",
+        book_id="book1",
+        image_path=image_path,
+        width=200,
+        height=300,
+        characters=[
+            convert_dataset.CharAnnotation(
+                unicode="U+E000",
+                x=100,
+                y=20,
+                width=20,
+                height=40,
+                block_id="",
+                char_id="C0001",
+                is_pua=True,
+                pua_code="U+E000",
+                pua_reading="き",
+                pua_memo="竹かんむりに車へん",
+            )
+        ],
+        columns=[],
+        segments=[],
+    )
+
+    records = list(
+        convert_dataset.generate_dataset_records(
+            [annotation],
+            {"U+E000": 0},
+            "coco",
+        )
+    )
+
+    assert records[0]["objects"]["is_pua"] == [True]
+    assert records[0]["objects"]["pua_code"] == ["U+E000"]
+    assert records[0]["objects"]["pua_reading"] == ["き"]
+    assert records[0]["objects"]["pua_memo"] == ["竹かんむりに車へん"]
+
+
 def test_generate_character_dataset_records_crops_from_page_image(tmp_path: Path) -> None:
     image_path = tmp_path / "page.png"
     page = PILImage.new("RGB", (10, 10), color="white")
@@ -177,13 +293,17 @@ def test_generate_character_dataset_records_crops_from_page_image(tmp_path: Path
         height=10,
         characters=[
             convert_dataset.CharAnnotation(
-                unicode="U+4E00",
+                unicode="U+E000",
                 x=2,
                 y=3,
                 width=4,
                 height=5,
                 block_id="B0001",
                 char_id="C0001",
+                is_pua=True,
+                pua_code="U+E000",
+                pua_reading="き",
+                pua_memo="竹かんむりに車へん",
             )
         ],
         columns=[],
@@ -193,14 +313,18 @@ def test_generate_character_dataset_records_crops_from_page_image(tmp_path: Path
     records = list(
         convert_dataset.generate_character_dataset_records(
             [annotation],
-            {"U+4E00": 0},
+            {"U+E000": 0},
         )
     )
 
     assert len(records) == 1
     assert records[0]["source_image_id"] == "page_001"
     assert records[0]["char_id"] == "C0001"
-    assert records[0]["category"] == "U+4E00"
+    assert records[0]["category"] == "U+E000"
+    assert records[0]["is_pua"] is True
+    assert records[0]["pua_code"] == "U+E000"
+    assert records[0]["pua_reading"] == "き"
+    assert records[0]["pua_memo"] == "竹かんむりに車へん"
     assert records[0]["bbox"] == [2, 3, 4, 5]
     assert records[0]["crop_bbox"] == [2, 3, 4, 5]
     assert records[0]["width"] == 4
@@ -334,6 +458,10 @@ def test_create_character_dataset_features_has_expected_schema() -> None:
         "block_id",
         "category",
         "category_id",
+        "is_pua",
+        "pua_code",
+        "pua_reading",
+        "pua_memo",
         "char",
         "bbox",
         "crop_bbox",

@@ -98,6 +98,7 @@ uv run python convert_dataset.py --bbox-format coco --raw-dir ./raw --dry-run
 | `--output-dir` | 出力ディレクトリ | ./output |
 | `--column-annotations-dir` | 列アノテーションCSVの親ディレクトリ | ./output |
 | `--segment-annotations-dir` | セグメントアノテーションCSVの親ディレクトリ | ./output_seg |
+| `--pua-metadata-path` | アノテーターの `pua_characters.json` へのパス（未指定時は自動探索） | None |
 | `--push-to-hub` | Hugging Face Hubにプッシュ | False |
 | `--hub-token` | Hubトークン（未指定時は HF_TOKEN → `hf auth login` 保存トークンの順で参照） | None |
 | `--hub-username` | Hubユーザー名/組織名 | None |
@@ -126,6 +127,10 @@ features = Features({
         "bbox": Sequence(Sequence(Value("float32"), length=4)),
         "category": Sequence(Value("string")),      # Unicode文字列（例: U+3042）
         "category_id": Sequence(Value("int32")),    # カテゴリID
+        "is_pua": Sequence(Value("bool")),          # category が私用領域コードか
+        "pua_code": Sequence(Value("string")),      # PUAコード（例: U+E000、通常文字は空文字）
+        "pua_reading": Sequence(Value("string")),   # pua_metadata.json 由来の読み
+        "pua_memo": Sequence(Value("string")),      # pua_metadata.json 由来のメモ
         "char": Sequence(Value("string")),          # 実際の文字（例: あ）
     },
     "columns": {
@@ -153,6 +158,10 @@ features = Features({
     "block_id": Value("string"),
     "category": Value("string"),     # Unicode文字列（例: U+3042）
     "category_id": Value("int32"),
+    "is_pua": Value("bool"),         # category が私用領域コードか
+    "pua_code": Value("string"),     # PUAコード（例: U+E000、通常文字は空文字）
+    "pua_reading": Value("string"),  # pua_metadata.json 由来の読み
+    "pua_memo": Value("string"),     # pua_metadata.json 由来のメモ
     "char": Value("string"),         # 実際の文字（例: あ）
     "bbox": Sequence(Value("int32"), length=4),       # 元ページ上の bbox [x, y, w, h]
     "crop_bbox": Sequence(Value("int32"), length=4),  # 実際に使ったクロップ bbox [x, y, w, h]
@@ -165,6 +174,7 @@ features = Features({
 
 - `output/label2id.json` - Unicode → ID マッピング
 - `output/id2label.json` - ID → Unicode マッピング
+- `output/pua_metadata.json` - PUAコード → 読み・メモのマッピング（メタデータが見つかった場合のみ）
 - `output/kuzushiji-dataset-{形式}/` - ローカル保存時のデータセット
 - `output/kuzushiji-dataset-characters/` - 文字単位のクロップ画像データセット
 - `output/kuzushiji-dataset-roboflow-yolov8-columns/` - Roboflow 向け YOLOv8 データセット
