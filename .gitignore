@@ -14,5 +14,9 @@ raw/
 
 # output directory
 output/
+output*/
+
+# OS
+.DS_Store
 
 *.zip

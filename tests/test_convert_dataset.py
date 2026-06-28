@@ -2,6 +2,9 @@ from pathlib import Path
 import sys
 
 import pandas as pd
+import pytest
+import yaml
+from PIL import Image as PILImage
 
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
@@ -72,6 +75,42 @@ def test_load_column_segment_annotations_builds_page_groups(tmp_path: Path) -> N
     assert segments[0].column_ids == ["COL0001"]
 
 
+def test_load_column_segment_annotations_uses_actual_image_size_for_yolo(tmp_path: Path) -> None:
+    book_id = "book1"
+    segment_dir = tmp_path / "output_seg" / book_id
+    segment_dir.mkdir(parents=True)
+
+    rows = pd.DataFrame(
+        [
+            {
+                "Image": "page_001",
+                "Unicode": "U+4E00",
+                "X": 100,
+                "Y": 20,
+                "Width": 20,
+                "Height": 40,
+                "Char ID": "C0001",
+                "Block ID": "",
+                "Column ID": "COL0001",
+                "Segment ID": "SEG0001",
+            }
+        ]
+    )
+    rows.to_csv(segment_dir / "column_annotation.csv", index=False)
+
+    page_map = convert_dataset.load_column_segment_annotations(
+        book_id,
+        None,
+        tmp_path / "output_seg",
+        "yolo",
+        image_sizes={"page_001": (200, 100)},
+    )
+
+    columns, segments = page_map["page_001"]
+    assert columns[0].bbox == [0.55, 0.4, 0.1, 0.4]
+    assert segments[0].bbox == [0.55, 0.4, 0.1, 0.4]
+
+
 def test_generate_dataset_records_includes_columns_and_segments(tmp_path: Path) -> None:
     image_path = tmp_path / "page.jpg"
     image_path.write_bytes(b"fake-image")
@@ -120,3 +159,211 @@ def test_generate_dataset_records_includes_columns_and_segments(tmp_path: Path) 
 
     assert records[0]["columns"]["column_id"] == ["COL0001"]
     assert records[0]["segments"]["segment_id"] == ["SEG0001"]
+
+
+def test_generate_character_dataset_records_crops_from_page_image(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    page = PILImage.new("RGB", (10, 10), color="white")
+    for x in range(2, 6):
+        for y in range(3, 8):
+            page.putpixel((x, y), (255, 0, 0))
+    page.save(image_path)
+
+    annotation = convert_dataset.ImageAnnotation(
+        image_id="page_001",
+        book_id="book1",
+        image_path=image_path,
+        width=10,
+        height=10,
+        characters=[
+            convert_dataset.CharAnnotation(
+                unicode="U+4E00",
+                x=2,
+                y=3,
+                width=4,
+                height=5,
+                block_id="B0001",
+                char_id="C0001",
+            )
+        ],
+        columns=[],
+        segments=[],
+    )
+
+    records = list(
+        convert_dataset.generate_character_dataset_records(
+            [annotation],
+            {"U+4E00": 0},
+        )
+    )
+
+    assert len(records) == 1
+    assert records[0]["source_image_id"] == "page_001"
+    assert records[0]["char_id"] == "C0001"
+    assert records[0]["category"] == "U+4E00"
+    assert records[0]["bbox"] == [2, 3, 4, 5]
+    assert records[0]["crop_bbox"] == [2, 3, 4, 5]
+    assert records[0]["width"] == 4
+    assert records[0]["height"] == 5
+
+    cropped = PILImage.open(convert_dataset.io.BytesIO(records[0]["image"]["bytes"]))
+    assert cropped.size == (4, 5)
+    assert cropped.getpixel((1, 1)) == (255, 0, 0)
+
+
+def test_generate_character_dataset_records_clamps_crop_to_image_bounds(tmp_path: Path) -> None:
+    image_path = tmp_path / "page.png"
+    PILImage.new("RGB", (10, 10), color="black").save(image_path)
+
+    annotation = convert_dataset.ImageAnnotation(
+        image_id="page_001",
+        book_id="book1",
+        image_path=image_path,
+        width=10,
+        height=10,
+        characters=[
+            convert_dataset.CharAnnotation(
+                unicode="U+4E00",
+                x=8,
+                y=7,
+                width=5,
+                height=6,
+                block_id="",
+                char_id="C0001",
+            )
+        ],
+        columns=[],
+        segments=[],
+    )
+
+    records = list(
+        convert_dataset.generate_character_dataset_records(
+            [annotation],
+            {"U+4E00": 0},
+        )
+    )
+
+    assert records[0]["crop_bbox"] == [8, 7, 2, 3]
+    assert records[0]["width"] == 2
+    assert records[0]["height"] == 3
+
+
+def test_export_roboflow_yolov8_writes_only_images_with_column_annotations(tmp_path: Path) -> None:
+    image_with_columns = tmp_path / "page_with_columns.jpg"
+    image_without_columns = tmp_path / "page_without_columns.jpg"
+    PILImage.new("RGB", (200, 100), color="white").save(image_with_columns)
+    PILImage.new("RGB", (200, 100), color="white").save(image_without_columns)
+
+    annotations = [
+        convert_dataset.ImageAnnotation(
+            image_id="page_with_columns",
+            book_id="book1",
+            image_path=image_with_columns,
+            width=200,
+            height=100,
+            characters=[],
+            columns=[
+                convert_dataset.ColumnAnnotation(
+                    column_id="COL0001",
+                    bbox=[0.55, 0.4, 0.1, 0.4],
+                    char_ids=["C0001"],
+                    segment_id="SEG0001",
+                )
+            ],
+            segments=[],
+        ),
+        convert_dataset.ImageAnnotation(
+            image_id="page_without_columns",
+            book_id="book1",
+            image_path=image_without_columns,
+            width=200,
+            height=100,
+            characters=[],
+            columns=[],
+            segments=[],
+        ),
+    ]
+
+    output_dir = tmp_path / "roboflow-output"
+    convert_dataset.export_roboflow_yolov8_dataset(
+        annotations=annotations,
+        output_dir=output_dir,
+        dataset_name_prefix="kuzushiji-dataset",
+    )
+
+    dataset_dir = output_dir / "kuzushiji-dataset-roboflow-yolov8-columns"
+    train_images = dataset_dir / "train" / "images"
+    train_labels = dataset_dir / "train" / "labels"
+
+    assert (train_images / "page_with_columns.jpg").exists()
+    assert (train_labels / "page_with_columns.txt").exists()
+    assert not (train_images / "page_without_columns.jpg").exists()
+    assert not (train_labels / "page_without_columns.txt").exists()
+    assert (train_labels / "page_with_columns.txt").read_text(encoding="utf-8").strip() == "0 0.550000 0.400000 0.100000 0.400000"
+
+    data_yaml = yaml.safe_load((dataset_dir / "data.yaml").read_text(encoding="utf-8"))
+    assert data_yaml["nc"] == 1
+    assert data_yaml["names"] == ["column"]
+    assert data_yaml["train"] == "train/images"
+
+
+def test_main_rejects_push_to_hub_for_roboflow_export(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "convert_dataset.py",
+            "--export-format",
+            "roboflow",
+            "--push-to-hub",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        convert_dataset.main()
+
+
+def test_create_character_dataset_features_has_expected_schema() -> None:
+    features = convert_dataset.create_character_dataset_features()
+
+    assert set(features.keys()) == {
+        "image",
+        "source_image_id",
+        "book_id",
+        "char_id",
+        "block_id",
+        "category",
+        "category_id",
+        "char",
+        "bbox",
+        "crop_bbox",
+        "width",
+        "height",
+    }
+
+
+def test_dataset_type_helpers() -> None:
+    assert convert_dataset.should_generate_page_dataset("page") is True
+    assert convert_dataset.should_generate_page_dataset("both") is True
+    assert convert_dataset.should_generate_page_dataset("character") is False
+
+    assert convert_dataset.should_generate_character_dataset("character") is True
+    assert convert_dataset.should_generate_character_dataset("both") is True
+    assert convert_dataset.should_generate_character_dataset("page") is False
+
+
+def test_main_rejects_character_dataset_type_for_roboflow(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "convert_dataset.py",
+            "--export-format",
+            "roboflow",
+            "--dataset-type",
+            "character",
+        ],
+    )
+
+    with pytest.raises(SystemExit):
+        convert_dataset.main()

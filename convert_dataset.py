@@ -11,9 +11,11 @@ Hugging Face Datasets にアップロードする。
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import os
 import re
+import shutil
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -26,6 +28,8 @@ from PIL import Image as PILImage
 
 
 BboxFormat = Literal["coco", "yolo"]
+ExportFormat = Literal["hf", "roboflow"]
+DatasetType = Literal["page", "character", "both"]
 
 
 @dataclass
@@ -150,6 +154,13 @@ def build_bbox_from_frame(
     )
 
 
+def infer_annotation_extent(df: pd.DataFrame) -> tuple[int, int]:
+    """注釈の広がりから暫定画像サイズを推定する."""
+    img_width = int(df["X"].add(df["Width"]).max())
+    img_height = int(df["Y"].add(df["Height"]).max())
+    return img_width, img_height
+
+
 def scan_raw_directory(raw_dir: Path) -> Iterator[tuple[str, Path, Path]]:
     """rawディレクトリをスキャンし、各書籍のCSVと画像ディレクトリを返す.
 
@@ -172,6 +183,7 @@ def load_column_segment_annotations(
     column_dir: Path | None,
     segment_dir: Path | None,
     bbox_format: BboxFormat,
+    image_sizes: dict[str, tuple[int, int]] | None = None,
 ) -> dict[str, tuple[list[ColumnAnnotation], list[SegmentAnnotation]]]:
     """列/セグメントアノテーションをページ単位で読み込む."""
     page_map: dict[str, tuple[list[ColumnAnnotation], list[SegmentAnnotation]]] = {}
@@ -208,8 +220,11 @@ def load_column_segment_annotations(
         if source_df.empty:
             continue
 
-        img_width = int(source_df["X"].add(source_df["Width"]).max())
-        img_height = int(source_df["Y"].add(source_df["Height"]).max())
+        img_width, img_height = (
+            image_sizes[page_id]
+            if image_sizes is not None and page_id in image_sizes
+            else infer_annotation_extent(source_df)
+        )
 
         columns: list[ColumnAnnotation] = []
         if "Column ID" in source_df.columns:
@@ -273,11 +288,20 @@ def load_annotations(
 ) -> list[ImageAnnotation]:
     """CSVファイルからアノテーションを読み込む."""
     df = pd.read_csv(csv_path)
+    image_sizes: dict[str, tuple[int, int]] = {}
+    for image_name in sorted({str(value) for value in df["Image"].dropna().tolist()}):
+        image_path = images_dir / f"{image_name}.jpg"
+        if not image_path.exists():
+            continue
+        with PILImage.open(image_path) as img:
+            image_sizes[image_name] = img.size
+
     page_level_annotations = load_column_segment_annotations(
         book_id,
         column_dir,
         segment_dir,
         bbox_format,
+        image_sizes=image_sizes,
     )
 
     # 画像ごとにグループ化
@@ -410,6 +434,69 @@ def generate_dataset_records(
         }
 
 
+def clamp_bbox_to_image(
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    img_width: int,
+    img_height: int,
+) -> tuple[int, int, int, int]:
+    """画像境界内に bbox を収める."""
+    left = max(0, min(x, img_width))
+    top = max(0, min(y, img_height))
+    right = max(left, min(x + width, img_width))
+    bottom = max(top, min(y + height, img_height))
+    return left, top, right, bottom
+
+
+def encode_pil_image_to_png_bytes(image: PILImage.Image) -> bytes:
+    """PIL Image を PNG bytes に変換する."""
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def generate_character_dataset_records(
+    annotations: list[ImageAnnotation],
+    label2id: dict[str, int],
+) -> Iterator[dict[str, Any]]:
+    """文字単位のクロップ画像データセットを生成する."""
+    for ann in annotations:
+        with PILImage.open(ann.image_path) as page_image:
+            for char in ann.characters:
+                left, top, right, bottom = clamp_bbox_to_image(
+                    char.x,
+                    char.y,
+                    char.width,
+                    char.height,
+                    ann.width,
+                    ann.height,
+                )
+                cropped = page_image.crop((left, top, right, bottom))
+                crop_width = right - left
+                crop_height = bottom - top
+                crop_filename = f"{ann.image_id}_{char.char_id}.png"
+
+                yield {
+                    "image": {
+                        "bytes": encode_pil_image_to_png_bytes(cropped),
+                        "path": crop_filename,
+                    },
+                    "source_image_id": ann.image_id,
+                    "book_id": ann.book_id,
+                    "char_id": char.char_id,
+                    "block_id": str(char.block_id),
+                    "category": char.unicode,
+                    "category_id": label2id[char.unicode],
+                    "char": parse_unicode_to_char(char.unicode),
+                    "bbox": [char.x, char.y, char.width, char.height],
+                    "crop_bbox": [left, top, crop_width, crop_height],
+                    "width": crop_width,
+                    "height": crop_height,
+                }
+
+
 def create_dataset_features() -> Features:
     """データセットのフィーチャー定義を作成する."""
     return Features(
@@ -440,6 +527,26 @@ def create_dataset_features() -> Features:
     )
 
 
+def create_character_dataset_features() -> Features:
+    """文字単位データセットのフィーチャー定義を作成する."""
+    return Features(
+        {
+            "image": Image(),
+            "source_image_id": Value("string"),
+            "book_id": Value("string"),
+            "char_id": Value("string"),
+            "block_id": Value("string"),
+            "category": Value("string"),
+            "category_id": Value("int32"),
+            "char": Value("string"),
+            "bbox": Sequence(Value("int32"), length=4),
+            "crop_bbox": Sequence(Value("int32"), length=4),
+            "width": Value("int32"),
+            "height": Value("int32"),
+        }
+    )
+
+
 def save_label_mapping(
     label2id: dict[str, int],
     id2label: dict[int, str],
@@ -459,6 +566,69 @@ def save_label_mapping(
         json.dump(id2label_str_keys, f, ensure_ascii=False, indent=2)
 
     print(f"Saved label mappings to {output_dir}")
+
+
+def format_yolo_label_line(bbox: list[float]) -> str:
+    """YOLO bbox 1件分をラベル行に変換する."""
+    x_center, y_center, width, height = bbox
+    return f"0 {x_center:.6f} {y_center:.6f} {width:.6f} {height:.6f}"
+
+
+def export_roboflow_yolov8_dataset(
+    annotations: list[ImageAnnotation],
+    output_dir: Path,
+    dataset_name_prefix: str,
+) -> Path:
+    """Roboflow 向け YOLOv8 検出データセットを書き出す."""
+    dataset_dir = output_dir / f"{dataset_name_prefix}-roboflow-yolov8-columns"
+    images_dir = dataset_dir / "train" / "images"
+    labels_dir = dataset_dir / "train" / "labels"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    labels_dir.mkdir(parents=True, exist_ok=True)
+
+    exported_count = 0
+    for ann in annotations:
+        if not ann.columns:
+            continue
+
+        dst_image_path = images_dir / ann.image_path.name
+        shutil.copy2(ann.image_path, dst_image_path)
+
+        yolo_bboxes = [
+            column.bbox if all(0.0 <= value <= 1.0 for value in column.bbox)
+            else convert_bbox(
+                int(column.bbox[0]),
+                int(column.bbox[1]),
+                int(column.bbox[2]),
+                int(column.bbox[3]),
+                ann.width,
+                ann.height,
+                "yolo",
+            )
+            for column in ann.columns
+        ]
+        label_lines = [format_yolo_label_line(bbox) for bbox in yolo_bboxes]
+        label_path = labels_dir / f"{ann.image_path.stem}.txt"
+        label_path.write_text("\n".join(label_lines) + "\n", encoding="utf-8")
+        exported_count += 1
+
+    data_yaml = "\n".join(
+        [
+            f"path: {dataset_dir}",
+            "train: train/images",
+            "val: ''",
+            "test: ''",
+            "nc: 1",
+            "names:",
+            "  - column",
+            "",
+        ]
+    )
+    (dataset_dir / "data.yaml").write_text(data_yaml, encoding="utf-8")
+
+    print(f"Roboflow dataset exported: {dataset_dir}")
+    print(f"Exported {exported_count} annotated images")
+    return dataset_dir
 
 
 def create_dataset_card(
@@ -601,6 +771,69 @@ Data provided by: ROIS-DS Center for Open Data in the Humanities (人文学オ�
     return DatasetCard(content)
 
 
+def create_character_dataset_card(
+    repo_id: str,
+    num_characters: int,
+    num_books: int,
+    num_categories: int,
+) -> DatasetCard:
+    """文字単位データセットカードを作成する."""
+    card_data = DatasetCardData(
+        language=["ja"],
+        license="cc-by-sa-4.0",
+        task_categories=["image-classification"],
+        tags=["kuzushiji", "japanese", "historical-documents", "ocr", "character-crops"],
+        size_categories=["1K<n<10K"] if num_characters < 10000 else ["10K<n<100K"],
+    )
+
+    content = f"""---
+{card_data.to_yaml()}
+---
+
+# Kuzushiji Character Dataset
+
+This dataset contains character crops generated directly from page images using raw character annotations.
+
+## Dataset Description
+
+- **Number of character images**: {num_characters:,}
+- **Number of books**: {num_books}
+- **Number of character categories**: {num_categories:,}
+- **Crop source**: raw page image + annotation CSV
+- **Image size**: original cropped size (no resize)
+
+## Dataset Structure
+
+```python
+{{
+    "image": Image(),                # Cropped character image
+    "source_image_id": str,          # Source page image ID
+    "book_id": str,                  # Book ID
+    "char_id": str,                  # Character annotation ID
+    "block_id": str,                 # Block ID
+    "category": str,                 # Unicode string (e.g., U+3042)
+    "category_id": int,              # Category ID
+    "char": str,                     # Actual character
+    "bbox": List[int],               # Original bbox on the source page [x, y, w, h]
+    "crop_bbox": List[int],          # Clamped bbox used for cropping [x, y, w, h]
+    "width": int,                    # Crop width in pixels
+    "height": int,                   # Crop height in pixels
+}}
+```
+"""
+    return DatasetCard(content)
+
+
+def should_generate_page_dataset(dataset_type: DatasetType) -> bool:
+    """ページ単位 dataset を生成するか判定する."""
+    return dataset_type in {"page", "both"}
+
+
+def should_generate_character_dataset(dataset_type: DatasetType) -> bool:
+    """文字単位 dataset を生成するか判定する."""
+    return dataset_type in {"character", "both"}
+
+
 def resolve_repo_id(
     dataset_name: str,
     hub_username: str | None,
@@ -620,6 +853,20 @@ def main() -> None:
     """メイン処理."""
     parser = argparse.ArgumentParser(
         description="Convert raw data to Hugging Face Dataset format"
+    )
+    parser.add_argument(
+        "--export-format",
+        type=str,
+        choices=["hf", "roboflow"],
+        default="hf",
+        help="Export format (default: hf)",
+    )
+    parser.add_argument(
+        "--dataset-type",
+        type=str,
+        choices=["page", "character", "both"],
+        default="both",
+        help="Dataset target for HF export (default: both)",
     )
     parser.add_argument(
         "--bbox-format",
@@ -690,10 +937,19 @@ def main() -> None:
     args = parser.parse_args()
 
     bbox_format: BboxFormat = args.bbox_format
+    export_format: ExportFormat = args.export_format
+    dataset_type: DatasetType = args.dataset_type
     raw_dir: Path = args.raw_dir.resolve()
     output_dir: Path = args.output_dir.resolve()
     column_annotations_dir = args.column_annotations_dir.resolve()
     segment_annotations_dir = args.segment_annotations_dir.resolve()
+
+    if export_format == "roboflow" and args.push_to_hub:
+        msg = "--push-to-hub は --export-format roboflow と同時に使用できません"
+        raise SystemExit(msg)
+    if export_format == "roboflow" and dataset_type == "character":
+        msg = "--dataset-type character は --export-format roboflow と同時に使用できません"
+        raise SystemExit(msg)
 
     if not raw_dir.exists():
         print(f"Error: Raw directory not found: {raw_dir}")
@@ -703,6 +959,8 @@ def main() -> None:
     hub_token = args.hub_token or os.environ.get("HF_TOKEN") or get_token()
 
     print(f"Scanning raw directory: {raw_dir}")
+    print(f"Export format: {export_format}")
+    print(f"Dataset type: {dataset_type}")
     print(f"Bbox format: {bbox_format}")
 
     # 全アノテーションを収集
@@ -732,6 +990,14 @@ def main() -> None:
         print("No annotations found!")
         return
 
+    if export_format == "roboflow":
+        export_roboflow_yolov8_dataset(
+            annotations=all_annotations,
+            output_dir=output_dir,
+            dataset_name_prefix=args.dataset_name_prefix,
+        )
+        return
+
     # カテゴリマッピング構築
     print("Building category mapping...")
     label2id, id2label = build_category_mapping(all_annotations)
@@ -741,28 +1007,61 @@ def main() -> None:
     save_label_mapping(label2id, id2label, output_dir)
 
     # データセット作成（ジェネレータを使用してメモリ効率化）
-    print("Creating dataset with generator...")
-    features = create_dataset_features()
+    dataset: Dataset | None = None
+    character_dataset: Dataset | None = None
 
-    def gen():
-        yield from generate_dataset_records(all_annotations, label2id, bbox_format)
+    if should_generate_page_dataset(dataset_type):
+        print("Creating page dataset with generator...")
+        features = create_dataset_features()
 
-    dataset = Dataset.from_generator(gen, features=features)
+        def gen():
+            yield from generate_dataset_records(all_annotations, label2id, bbox_format)
 
-    print(f"Dataset created: {dataset}")
-    print(f"Sample record keys: {list(dataset[0].keys())}")
+        dataset = Dataset.from_generator(gen, features=features)
+
+        print(f"Page dataset created: {dataset}")
+        print(f"Sample record keys: {list(dataset[0].keys())}")
+
+    if should_generate_character_dataset(dataset_type):
+        print("Creating character crop dataset with generator...")
+        character_features = create_character_dataset_features()
+
+        def character_gen():
+            yield from generate_character_dataset_records(all_annotations, label2id)
+
+        character_dataset = Dataset.from_generator(character_gen, features=character_features)
+
+        print(f"Character dataset created: {character_dataset}")
+        print(f"Character sample record keys: {list(character_dataset[0].keys())}")
 
     # Hubにプッシュ
     if args.push_to_hub:
-        dataset_name = f"{args.dataset_name_prefix}-{bbox_format}"
-        repo_id = resolve_repo_id(dataset_name, args.hub_username, hub_token)
+        repo_id: str | None = None
+        character_repo_id: str | None = None
 
-        print(f"Pushing to Hub: {repo_id}")
-        dataset.push_to_hub(
-            repo_id,
-            token=hub_token,
-            max_shard_size=args.max_shard_size,
-        )
+        if dataset is not None:
+            dataset_name = f"{args.dataset_name_prefix}-{bbox_format}"
+            repo_id = resolve_repo_id(dataset_name, args.hub_username, hub_token)
+            print(f"Pushing to Hub: {repo_id}")
+            dataset.push_to_hub(
+                repo_id,
+                token=hub_token,
+                max_shard_size=args.max_shard_size,
+            )
+
+        if character_dataset is not None:
+            character_dataset_name = f"{args.dataset_name_prefix}-characters"
+            character_repo_id = resolve_repo_id(
+                character_dataset_name,
+                args.hub_username,
+                hub_token,
+            )
+            print(f"Pushing to Hub: {character_repo_id}")
+            character_dataset.push_to_hub(
+                character_repo_id,
+                token=hub_token,
+                max_shard_size=args.max_shard_size,
+            )
 
         # label2id.json と id2label.json をHubにアップロード
         api = HfApi(token=hub_token)
@@ -770,42 +1069,75 @@ def main() -> None:
 
         # label2id.json
         label2id_path = output_dir / "label2id.json"
-        api.upload_file(
-            path_or_fileobj=str(label2id_path),
-            path_in_repo="label2id.json",
-            repo_id=repo_id,
-            repo_type="dataset",
-            token=hub_token,
-        )
+        if repo_id is not None:
+            api.upload_file(
+                path_or_fileobj=str(label2id_path),
+                path_in_repo="label2id.json",
+                repo_id=repo_id,
+                repo_type="dataset",
+                token=hub_token,
+            )
+        if character_repo_id is not None:
+            api.upload_file(
+                path_or_fileobj=str(label2id_path),
+                path_in_repo="label2id.json",
+                repo_id=character_repo_id,
+                repo_type="dataset",
+                token=hub_token,
+            )
 
         # id2label.json
         id2label_path = output_dir / "id2label.json"
-        api.upload_file(
-            path_or_fileobj=str(id2label_path),
-            path_in_repo="id2label.json",
-            repo_id=repo_id,
-            repo_type="dataset",
-            token=hub_token,
-        )
+        if repo_id is not None:
+            api.upload_file(
+                path_or_fileobj=str(id2label_path),
+                path_in_repo="id2label.json",
+                repo_id=repo_id,
+                repo_type="dataset",
+                token=hub_token,
+            )
+        if character_repo_id is not None:
+            api.upload_file(
+                path_or_fileobj=str(id2label_path),
+                path_in_repo="id2label.json",
+                repo_id=character_repo_id,
+                repo_type="dataset",
+                token=hub_token,
+            )
 
         # データセットカードをアップロード
         print("Uploading dataset card...")
-        card = create_dataset_card(
-            repo_id=repo_id,
-            bbox_format=bbox_format,
-            num_images=len(all_annotations),
-            num_books=book_count,
-            num_categories=len(label2id),
-        )
-        card.push_to_hub(repo_id, token=hub_token)
-
-        print(f"Dataset pushed to: https://huggingface.co/datasets/{repo_id}")
+        if repo_id is not None:
+            card = create_dataset_card(
+                repo_id=repo_id,
+                bbox_format=bbox_format,
+                num_images=len(all_annotations),
+                num_books=book_count,
+                num_categories=len(label2id),
+            )
+            card.push_to_hub(repo_id, token=hub_token)
+            print(f"Dataset pushed to: https://huggingface.co/datasets/{repo_id}")
+        if character_repo_id is not None:
+            character_card = create_character_dataset_card(
+                repo_id=character_repo_id,
+                num_characters=sum(len(ann.characters) for ann in all_annotations),
+                num_books=book_count,
+                num_categories=len(label2id),
+            )
+            character_card.push_to_hub(character_repo_id, token=hub_token)
+            print(f"Dataset pushed to: https://huggingface.co/datasets/{character_repo_id}")
     else:
         # ローカルに保存
-        local_path = output_dir / f"{args.dataset_name_prefix}-{bbox_format}"
-        print(f"Saving dataset locally: {local_path}")
-        dataset.save_to_disk(str(local_path))
-        print(f"Dataset saved to: {local_path}")
+        if dataset is not None:
+            local_path = output_dir / f"{args.dataset_name_prefix}-{bbox_format}"
+            print(f"Saving dataset locally: {local_path}")
+            dataset.save_to_disk(str(local_path))
+            print(f"Dataset saved to: {local_path}")
+        if character_dataset is not None:
+            character_local_path = output_dir / f"{args.dataset_name_prefix}-characters"
+            print(f"Saving dataset locally: {character_local_path}")
+            character_dataset.save_to_disk(str(character_local_path))
+            print(f"Dataset saved to: {character_local_path}")
 
 
 if __name__ == "__main__":
