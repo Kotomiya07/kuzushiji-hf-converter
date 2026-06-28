@@ -8,7 +8,47 @@ Hugging Face Datasets形式で、ページ単位 dataset と文字クロップ�
 uv sync
 ```
 
+`kuzushiji-column` のサブモジュールとして使う場合は、親リポジトリ側で以下を実行してから使用します。
+
+```bash
+git submodule update --init --recursive
+```
+
 ## 使用方法
+
+### kuzushiji-column から使う場合
+
+親プロジェクトの `raw/`, `output/`, `output_seg/` を入力にして、converter だけを直接実行できます。親リポジトリ直下で実行してください。
+
+```bash
+uv run --project kuzushiji-hf-converter \
+  python kuzushiji-hf-converter/convert_dataset.py \
+  --export-format hf \
+  --dataset-type both \
+  --bbox-format coco \
+  --raw-dir raw \
+  --output-dir hf_output \
+  --column-annotations-dir output \
+  --segment-annotations-dir output_seg
+```
+
+Hub へアップロードする場合は、事前に `hf auth login` を済ませるか、`HF_TOKEN` を環境変数に設定してから `--push-to-hub` を付けます。
+
+```bash
+uv run --project kuzushiji-hf-converter \
+  python kuzushiji-hf-converter/convert_dataset.py \
+  --export-format hf \
+  --dataset-type both \
+  --bbox-format coco \
+  --raw-dir raw \
+  --output-dir hf_output \
+  --column-annotations-dir output \
+  --segment-annotations-dir output_seg \
+  --push-to-hub \
+  --hub-username your_username
+```
+
+親アプリの `HF 更新` ボタンも同じ converter を使います。UI/API経由の更新ではローカル出力先に `hf_output/` を使い、Hub owner は `HF_HUB_USERNAME` / `HF_USERNAME` または画面/APIの指定値から解決します。
 
 ### 基本的な使用法（ローカル保存）
 
