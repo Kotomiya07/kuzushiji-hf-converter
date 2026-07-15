@@ -771,6 +771,44 @@ def export_roboflow_yolov8_dataset(
     return dataset_dir
 
 
+def get_size_category(num_examples: int) -> str:
+    """Hugging Face の件数カテゴリを返す."""
+    thresholds = (
+        (1_000, "n<1K"),
+        (10_000, "1K<n<10K"),
+        (100_000, "10K<n<100K"),
+        (1_000_000, "100K<n<1M"),
+        (10_000_000, "1M<n<10M"),
+        (100_000_000, "10M<n<100M"),
+        (1_000_000_000, "100M<n<1B"),
+    )
+    for upper_bound, category in thresholds:
+        if num_examples < upper_bound:
+            return category
+    return "n>1B"
+
+
+PUA_DATASET_CARD_SECTION = """## PUA (Private Use Area) Characters
+
+Some annotations use PUA (Private Use Area) code points for glyphs without a standard
+Unicode representation. The original code point is retained in `category`; the derived
+fields `is_pua`, `pua_code`, `pua_reading`, and `pua_memo` make these records explicit.
+Readings and notes are empty when no PUA metadata was supplied to the converter.
+
+A notable example is the four-way distinction around the kōto ligature:
+
+| Character / code | Variant | `is_pua` | `pua_reading` |
+|---|---|---:|---|
+| ヿ (`U+30FF`) | Katakana ヿ (standard Unicode) | false | — |
+| `U+E009` | Hiragana ヿ | true | こと (koto) |
+| `U+E00A` | Hiragana ヿ with dakuten | true | ごと (goto) |
+| `U+E00B` | Katakana ヿ with dakuten | true | ゴト (goto) |
+
+Depending on the research question, users may merge these forms, preserve them as
+separate classes, or exclude them. This choice is not made by the dataset converter.
+"""
+
+
 def create_dataset_card(
     repo_id: str,
     bbox_format: BboxFormat,
@@ -778,140 +816,304 @@ def create_dataset_card(
     num_books: int,
     num_categories: int,
 ) -> DatasetCard:
-    """データセットカードを作成する."""
+    """ページ単位データセットの詳細なカードを作成する."""
     bbox_descriptions = {
-        "coco": "[x_min, y_min, width, height] (pixels)",
-        "yolo": "[x_center, y_center, width, height] (normalized 0-1)",
+        "coco": "[x_min, y_min, width, height] in pixels",
+        "yolo": "[x_center, y_center, width, height], normalized to 0–1",
     }
-
+    pretty_format = bbox_format.upper()
     card_data = DatasetCardData(
+        pretty_name=f"Kuzushiji Page Dataset ({pretty_format})",
         language=["ja"],
         license="cc-by-sa-4.0",
         task_categories=["object-detection"],
-        tags=["kuzushiji", "japanese", "historical-documents", "ocr", bbox_format],
-        size_categories=["1K<n<10K"] if num_images < 10000 else ["10K<n<100K"],
+        tags=[
+            "kuzushiji",
+            "japanese",
+            "historical-documents",
+            "ocr",
+            "document-layout-analysis",
+            bbox_format,
+        ],
+        size_categories=[get_size_category(num_images)],
     )
 
     content = f"""---
 {card_data.to_yaml()}
 ---
 
-# Kuzushiji Dataset ({bbox_format.upper()} format)
+# Dataset Card for Kuzushiji Page Dataset
 
-This dataset contains page images from historical Japanese documents (Kotenseki)
-with character-level bounding box annotations for Kuzushiji (cursive Japanese) recognition.
+## Dataset Summary
 
-## Dataset Description
+The Kuzushiji Page Dataset packages page images from Japanese historical books with
+character-level bounding boxes and labels. When supplied during conversion, it also
+includes reading-column and segment annotations for document-layout analysis. This
+repository contains the **{pretty_format}** variant; bounding boxes use
+`{bbox_descriptions[bbox_format]}`.
 
-- **Number of images**: {num_images:,}
-- **Number of books**: {num_books}
-- **Number of character categories**: {num_categories:,}
-- **Bounding box format**: {bbox_descriptions[bbox_format]}
-- **Additional annotations**: optional column / segment bounding boxes
+This card describes the generated repository `{repo_id}`. Its statistics are calculated
+at conversion time rather than copied from the upstream collection:
+
+| Statistic | Value |
+|---|---:|
+| Page images | {num_images:,} |
+| Books | {num_books:,} |
+| Character categories | {num_categories:,} |
+| Split | `train` only |
+
+The source material is the **日本古典籍くずし字データセット (Japanese Historical
+Character Dataset)**, owned by the National Institute of Japanese Literature (NIJL)
+and other institutions and processed by the ROIS-DS Center for Open Data in the
+Humanities (CODH).
+
+## Supported Tasks and Leaderboards
+
+- **Character detection / Kuzushiji recognition**: use `objects.bbox`, `category`, and
+  `category_id` to locate and classify cursive Japanese characters.
+- **Document layout analysis**: use the optional `columns` and `segments` fields to
+  detect reading columns and larger text regions.
+- **OCR preprocessing and evaluation**: use the page image, book identifier, Unicode
+  labels, and layout hierarchy to construct recognition pipelines.
+
+There is no official train/evaluation split, benchmark protocol, or leaderboard for this
+converted dataset. Users must define evaluation splits appropriate to their task.
+
+## Languages
+
+The documents are in Japanese (`ja`), primarily historical written Japanese represented
+in Kuzushiji. The metadata does not provide a verified language distribution by book,
+period, script type, or genre.
 
 ## Dataset Structure
 
-```python
-{{
-    "image": Image(),                    # Page image
-    "image_id": str,                     # Image ID (e.g., 100241706_00004_2)
-    "book_id": str,                      # Book ID (e.g., 100241706)
-    "width": int,                        # Image width in pixels
-    "height": int,                       # Image height in pixels
-    "objects": {{
-        "bbox": List[List[float]],       # Bounding boxes ({bbox_descriptions[bbox_format]})
-        "category": List[str],           # Unicode strings (e.g., U+3042)
-        "category_id": List[int],        # Category IDs
-        "is_pua": List[bool],            # Whether category is a Private Use Area code
-        "pua_code": List[str],           # PUA code strings if applicable
-        "pua_reading": List[str],        # PUA readings from pua_metadata.json if available
-        "pua_memo": List[str],           # PUA notes from pua_metadata.json if available
-        "char": List[str],               # Actual characters (e.g., あ)
-    }},
-    "columns": {{
-        "bbox": List[List[float]],       # Column boxes
-        "column_id": List[str],          # Column IDs (e.g., COL0001)
-        "char_ids": List[List[str]],     # Member Char IDs
-        "segment_id": List[str],         # Parent Segment IDs if available
-    }},
-    "segments": {{
-        "bbox": List[List[float]],       # Segment boxes
-        "segment_id": List[str],         # Segment IDs (e.g., SEG0001)
-        "column_ids": List[List[str]],   # Member Column IDs
-    }}
-}}
-```
-
-## Bounding Box Formats
-
-| Format | Description | Normalized |
-|--------|-------------|------------|
-| COCO | [x_min, y_min, width, height] | No (pixels) |
-| YOLO | [x_center, y_center, width, height] | Yes (0-1) |
-
-## Usage
+### Data Instances
 
 ```python
 from datasets import load_dataset
-import json
 
 dataset = load_dataset("{repo_id}")
-
-# Access first example
 example = dataset["train"][0]
-print(f"Image ID: {{example['image_id']}}")
-print(f"Number of characters: {{len(example['objects']['bbox'])}}")
 
-# Load label mappings
-from huggingface_hub import hf_hub_download
-
-label2id_path = hf_hub_download(
-    repo_id="{repo_id}",
-    filename="label2id.json",
-    repo_type="dataset"
-)
-with open(label2id_path) as f:
-    label2id = json.load(f)
-
-print(f"Number of categories: {{len(label2id)}}")
+print(example["image_id"], example["book_id"])
+print(example["objects"]["bbox"][:3])
 ```
 
-## Label Mappings
+A record has the following shape (sequences may be empty):
 
-This dataset includes the following mapping files:
-- `label2id.json`: Unicode string (e.g., "U+3042") to category ID mapping
-- `id2label.json`: Category ID to Unicode string mapping
-- `pua_metadata.json`: PUA code to reading / memo mapping when annotator metadata is available
+```python
+{{
+    "image": Image(),
+    "image_id": str,
+    "book_id": str,
+    "width": int,
+    "height": int,
+    "objects": {{
+        "bbox": list[list[float]],
+        "category": list[str],
+        "category_id": list[int],
+        "is_pua": list[bool],
+        "pua_code": list[str],
+        "pua_reading": list[str],
+        "pua_memo": list[str],
+        "char": list[str],
+    }},
+    "columns": {{
+        "bbox": list[list[float]],
+        "column_id": list[str],
+        "char_ids": list[list[str]],
+        "segment_id": list[str],
+    }},
+    "segments": {{
+        "bbox": list[list[float]],
+        "segment_id": list[str],
+        "column_ids": list[list[str]],
+    }},
+}}
+```
 
-## License
+### Data Fields
 
-This dataset is licensed under [CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/).
+| Field | Type | Description |
+|---|---|---|
+| `image` | `Image` | Full page image. |
+| `image_id` | `string` | Source page identifier, without the image extension. |
+| `book_id` | `string` | Identifier of the source book. |
+| `width`, `height` | `int32` | Page dimensions in pixels. |
+| `objects.bbox` | sequence of 4 floats | Character boxes in the repository's declared bbox format. |
+| `objects.category` | sequence of strings | Unicode labels such as `U+3042`; PUA labels are preserved. |
+| `objects.category_id` | sequence of `int32` | Integer IDs defined by `label2id.json`. |
+| `objects.is_pua` | sequence of booleans | Whether each label is in a Unicode Private Use Area. |
+| `objects.pua_code` | sequence of strings | PUA code, or an empty string for a standard Unicode label. |
+| `objects.pua_reading` | sequence of strings | Optional reading imported from PUA metadata. |
+| `objects.pua_memo` | sequence of strings | Optional note imported from PUA metadata. |
+| `objects.char` | sequence of strings | Character obtained from the Unicode code point. |
+| `columns.bbox` | sequence of 4 floats | Union box of the characters assigned to a reading column. |
+| `columns.column_id` | sequence of strings | Column identifiers such as `COL0001`. |
+| `columns.char_ids` | sequence of string sequences | Character IDs belonging to each column. |
+| `columns.segment_id` | sequence of strings | Parent segment ID, or an empty string when unavailable. |
+| `segments.bbox` | sequence of 4 floats | Union box of columns/characters assigned to a segment. |
+| `segments.segment_id` | sequence of strings | Segment identifiers such as `SEG0001`. |
+| `segments.column_ids` | sequence of string sequences | Column IDs belonging to each segment. |
 
-## Data Source
+The parallel sequences within `objects`, `columns`, and `segments` are positionally
+aligned. `columns` and `segments` can be empty when the corresponding optional annotation
+files were not provided or a page was not annotated.
 
-This dataset is derived from the **日本古典籍くずし字データセット (Japanese Historical Character Dataset)**.
+### Data Splits
 
-- **Provider**: National Institute of Japanese Literature and other institutions (国文学研究資料館ほか所蔵)
+| Split | Number of rows |
+|---|---:|
+| train | {num_images:,} |
+
+No validation or test split is generated. To reduce leakage between pages from the same
+work, create downstream splits by `book_id`, not by randomly splitting individual rows.
+
+### Bounding Box Formats
+
+| Variant | Coordinates | Normalized |
+|---|---|---:|
+| COCO | `[x_min, y_min, width, height]` | No; pixel units |
+| YOLO | `[x_center, y_center, width, height]` | Yes; values in 0–1 |
+
+All character, column, and segment boxes in this repository use the **{pretty_format}**
+variant. Do not infer the format from the values alone.
+
+### Label Mapping Files
+
+- `label2id.json`: Unicode label to category ID.
+- `id2label.json`: category ID to Unicode label.
+- `pua_metadata.json`: PUA code to reading and memo, only when metadata was available.
+
+{PUA_DATASET_CARD_SECTION}
+
+## Dataset Creation
+
+### Curation Rationale
+
+This conversion makes the upstream character coordinates directly usable with Hugging
+Face Datasets and preserves page/book provenance. Optional column and segment structures
+support layout-aware OCR and reading-order research without replacing the original
+character annotations.
+
+### Source Data
+
+#### Initial Data Collection and Normalization
+
+The converter reads each source page image and its coordinate CSV. It validates image
+availability, converts Unicode code points to display characters, assigns deterministic
+category IDs, and converts boxes to the selected COCO or YOLO representation. Column and
+segment boxes are derived as unions of their member character boxes when matching local
+annotation CSV files are supplied. The images themselves are not resized by this step.
+
+Upstream source:
+
+- **Dataset**: 日本古典籍くずし字データセット
+- **Owners**: National Institute of Japanese Literature and other institutions
 - **Processing**: ROIS-DS Center for Open Data in the Humanities (CODH)
 - **DOI**: [10.20676/00000340](https://doi.org/10.20676/00000340)
-- **Website**: [https://codh.rois.ac.jp/char-shape/](https://codh.rois.ac.jp/char-shape/)
+- **Website**: [codh.rois.ac.jp/char-shape](https://codh.rois.ac.jp/char-shape/)
 
-## Citation
+#### Who Are the Source Language Producers?
 
-If you use this dataset, please cite:
+The text was produced by historical Japanese authors, scribes, printers, and publishers.
+Their identities and demographic attributes are not encoded in this converted dataset.
+The holding institutions and CODH provide and process the digitized source material.
 
+### Annotations
+
+#### Annotation Process
+
+Character labels and coordinates originate from the upstream dataset. The converter does
+not re-transcribe or independently verify them. Column annotations are optional local
+assignments of characters to reading columns. Segment annotations are optional derived or
+human-corrected groupings of columns. Their availability can therefore differ by book and
+page; empty sequences do not mean that the page contains no text.
+
+#### Who Are the Annotators?
+
+See the upstream dataset documentation for the provenance of character annotations. The
+converter does not store annotator identities for optional column/segment annotations, so
+their annotator composition and inter-annotator agreement cannot be determined from this
+repository alone.
+
+### Personal and Sensitive Information
+
+Historical pages can contain personal names, addresses, ownership marks, or other
+information about historical individuals. No dedicated personal-information or sensitive-
+content audit is performed during conversion. Users should inspect the source material for
+their intended publication context and follow the policies of the holding institutions.
+
+## Considerations for Using the Data
+
+### Social Impact of the Dataset
+
+The dataset can support preservation, search, transcription, and accessibility of
+historical Japanese materials. Automated recognition may also produce plausible but
+incorrect readings; outputs should not be treated as authoritative transcriptions without
+review, especially in historical, genealogical, or identity-related research.
+
+### Discussion of Biases
+
+The collection reflects the books selected, preserved, digitized, and annotated by the
+source institutions rather than the full distribution of historical Japanese writing.
+Character frequencies, genres, periods, hands, print styles, page conditions, and
+institutions may be uneven. Rare characters and PUA labels are likely to be especially
+sparse. No demographic, geographic, genre, or performance fairness audit is included.
+
+### Other Known Limitations
+
+- Only a `train` split is provided; reported row counts describe this generated revision.
+- Annotation completeness and accuracy are inherited from upstream data and optional local
+  column/segment files; they are not independently audited by the converter.
+- Categories can be highly imbalanced, and PUA semantics depend on optional metadata.
+- Boxes are axis-aligned and cannot fully describe rotated, touching, damaged, or highly
+  irregular glyphs and regions.
+- Column and segment annotations may be absent or partially covered across books/pages.
+- `category_id` values are repository-specific; use the included mapping files rather than
+  assuming IDs are stable across independently generated versions.
+- A random page-level split can leak book-specific visual characteristics; split by book
+  for a stronger estimate of generalization.
+
+## Additional Information
+
+### Dataset Curators
+
+The source collection is curated and processed by NIJL, other holding institutions, and
+CODH. This Hugging Face packaging is generated by the `kuzushiji-hf-converter` project;
+consult the repository history for the maintainers of a particular published revision.
+
+### Licensing Information
+
+This generated dataset is distributed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). Users remain responsible
+for checking the upstream dataset terms, providing attribution, indicating modifications,
+and applying ShareAlike requirements to adaptations. This card is descriptive and is not
+legal advice.
+
+### Citation Information
+
+Please cite the source dataset:
+
+```text
+『日本古典籍くずし字データセット』（国文研ほか所蔵／CODH加工）
+doi:10.20676/00000340
 ```
-『日本古典籍くずし字データセット』（国文研ほか所蔵／CODH加工）doi:10.20676/00000340
+
+```text
+"Japanese Historical Character Dataset"
+(Owned by NIJL and others, Processed by CODH)
+doi:10.20676/00000340
 ```
 
-English:
-```
-"Japanese Historical Character Dataset" (Owned by NIJL and others, Processed by CODH) doi:10.20676/00000340
-```
+When publishing a derived dataset or model, also cite the exact Hugging Face repository
+revision used (`{repo_id}`) so that the generated schema and statistics are reproducible.
 
-## Acknowledgments
+### Contributions and Acknowledgments
 
-Data provided by: ROIS-DS Center for Open Data in the Humanities (人文学オープンデータ共同利用センター)
+Data is provided by the ROIS-DS Center for Open Data in the Humanities, the National
+Institute of Japanese Literature, and the other holding institutions credited by the
+upstream dataset.
 """
     return DatasetCard(content)
 
@@ -922,53 +1124,262 @@ def create_character_dataset_card(
     num_books: int,
     num_categories: int,
 ) -> DatasetCard:
-    """文字単位データセットカードを作成する."""
+    """文字単位データセットの詳細なカードを作成する."""
     card_data = DatasetCardData(
+        pretty_name="Kuzushiji Character Dataset",
         language=["ja"],
         license="cc-by-sa-4.0",
         task_categories=["image-classification"],
-        tags=["kuzushiji", "japanese", "historical-documents", "ocr", "character-crops"],
-        size_categories=["1K<n<10K"] if num_characters < 10000 else ["10K<n<100K"],
+        tags=[
+            "kuzushiji",
+            "japanese",
+            "historical-documents",
+            "ocr",
+            "character-crops",
+        ],
+        size_categories=[get_size_category(num_characters)],
     )
 
     content = f"""---
 {card_data.to_yaml()}
 ---
 
-# Kuzushiji Character Dataset
+# Dataset Card for Kuzushiji Character Dataset
 
-This dataset contains character crops generated directly from page images using raw character annotations.
+## Dataset Summary
 
-## Dataset Description
+The Kuzushiji Character Dataset contains individual character crops generated from full
+page images and character-coordinate annotations. Crops retain their original pixel size;
+they are not resized or padded. Each record keeps the source book, page, character ID,
+Unicode label, original page box, and the clamped box actually used for cropping.
 
-- **Number of character images**: {num_characters:,}
-- **Number of books**: {num_books}
-- **Number of character categories**: {num_categories:,}
-- **Crop source**: raw page image + annotation CSV
-- **Image size**: original cropped size (no resize)
+This card describes the generated repository `{repo_id}`. Statistics are calculated at
+conversion time:
+
+| Statistic | Value |
+|---|---:|
+| Character images | {num_characters:,} |
+| Books | {num_books:,} |
+| Character categories | {num_categories:,} |
+| Split | `train` only |
+
+The source material is the **日本古典籍くずし字データセット (Japanese Historical
+Character Dataset)**, owned by NIJL and other institutions and processed by CODH.
+
+## Supported Tasks and Leaderboards
+
+- **Image classification / Kuzushiji recognition**: predict `category` or `category_id`
+  from a cropped character image.
+- **Representation learning and retrieval**: learn glyph embeddings while retaining
+  `book_id` and `source_image_id` for provenance-aware evaluation.
+- **OCR component evaluation**: evaluate isolated-character recognizers before integrating
+  them into page-level detection and transcription systems.
+
+There is no official validation/test split, benchmark protocol, or leaderboard for this
+converted dataset.
+
+## Languages
+
+The labels represent characters used in historical Japanese (`ja`). A label is a Unicode
+code-point string, not a modern-Japanese reading or complete transcription. Language,
+period, genre, and script distributions are not provided at record level.
 
 ## Dataset Structure
 
+### Data Instances
+
+```python
+from datasets import load_dataset
+
+dataset = load_dataset("{repo_id}")
+example = dataset["train"][0]
+
+print(example["category"], example["char"])
+print(example["source_image_id"], example["crop_bbox"])
+```
+
 ```python
 {{
-    "image": Image(),                # Cropped character image
-    "source_image_id": str,          # Source page image ID
-    "book_id": str,                  # Book ID
-    "char_id": str,                  # Character annotation ID
-    "block_id": str,                 # Block ID
-    "category": str,                 # Unicode string (e.g., U+3042)
-    "category_id": int,              # Category ID
-    "is_pua": bool,                  # Whether category is a Private Use Area code
-    "pua_code": str,                 # PUA code string if applicable
-    "pua_reading": str,              # PUA reading from pua_metadata.json if available
-    "pua_memo": str,                 # PUA note from pua_metadata.json if available
-    "char": str,                     # Actual character
-    "bbox": List[int],               # Original bbox on the source page [x, y, w, h]
-    "crop_bbox": List[int],          # Clamped bbox used for cropping [x, y, w, h]
-    "width": int,                    # Crop width in pixels
-    "height": int,                   # Crop height in pixels
+    "image": Image(),
+    "source_image_id": str,
+    "book_id": str,
+    "char_id": str,
+    "block_id": str,
+    "category": str,
+    "category_id": int,
+    "is_pua": bool,
+    "pua_code": str,
+    "pua_reading": str,
+    "pua_memo": str,
+    "char": str,
+    "bbox": list[int],
+    "crop_bbox": list[int],
+    "width": int,
+    "height": int,
 }}
 ```
+
+### Data Fields
+
+| Field | Type | Description |
+|---|---|---|
+| `image` | `Image` | Character crop encoded from the source page; no resize or padding. |
+| `source_image_id` | `string` | Identifier of the page from which the crop was extracted. |
+| `book_id` | `string` | Identifier of the source book. |
+| `char_id` | `string` | Character annotation identifier within the source data. |
+| `block_id` | `string` | Optional source block identifier; may be empty. |
+| `category` | `string` | Unicode label such as `U+3042`; PUA labels are preserved. |
+| `category_id` | `int32` | Integer class ID defined by `label2id.json`. |
+| `is_pua` | `bool` | Whether `category` is in a Unicode Private Use Area. |
+| `pua_code` | `string` | PUA code, or an empty string for a standard Unicode label. |
+| `pua_reading` | `string` | Optional reading imported from PUA metadata. |
+| `pua_memo` | `string` | Optional note imported from PUA metadata. |
+| `char` | `string` | Character obtained from the Unicode code point. |
+| `bbox` | 4 `int32` values | Original page coordinates `[x, y, width, height]`. |
+| `crop_bbox` | 4 `int32` values | Boundary-clamped page coordinates actually used for cropping. |
+| `width`, `height` | `int32` | Resulting crop dimensions in pixels. |
+
+### Data Splits
+
+| Split | Number of rows |
+|---|---:|
+| train | {num_characters:,} |
+
+No validation or test split is generated. Multiple characters from the same page and book
+share visual and material characteristics. Downstream evaluation should therefore split by
+`book_id` (or at least `source_image_id`) before training rather than randomly splitting
+individual character rows.
+
+### Label Mapping Files
+
+- `label2id.json`: Unicode label to category ID.
+- `id2label.json`: category ID to Unicode label.
+- `pua_metadata.json`: PUA code to reading and memo, only when metadata was available.
+
+{PUA_DATASET_CARD_SECTION}
+
+## Dataset Creation
+
+### Curation Rationale
+
+This derived view supports isolated-character classification and retrieval without
+requiring users to reproduce page cropping. It preserves links to the source page and book
+so users can build leakage-resistant splits or return to the full context.
+
+### Source Data
+
+#### Initial Data Collection and Normalization
+
+For each character annotation, the converter reads `[x, y, width, height]` from the source
+CSV, intersects that rectangle with the source image bounds, and encodes the resulting
+crop. `bbox` records the original annotation; `crop_bbox` records the rectangle actually
+used. Empty intersections are skipped. Crops are not resized, padded, deskewed, denoised,
+or contrast-normalized.
+
+Upstream source:
+
+- **Dataset**: 日本古典籍くずし字データセット
+- **Owners**: National Institute of Japanese Literature and other institutions
+- **Processing**: ROIS-DS Center for Open Data in the Humanities (CODH)
+- **DOI**: [10.20676/00000340](https://doi.org/10.20676/00000340)
+- **Website**: [codh.rois.ac.jp/char-shape](https://codh.rois.ac.jp/char-shape/)
+
+#### Who Are the Source Language Producers?
+
+The source text was produced by historical Japanese authors, scribes, printers, and
+publishers. Their identities and demographic attributes are not represented as structured
+fields in this derived dataset.
+
+### Annotations
+
+#### Annotation Process
+
+Character labels and page coordinates come from the upstream dataset. The converter
+performs deterministic cropping and derives PUA helper fields, but it does not re-label,
+transcribe, or independently validate each glyph. Category IDs are created from the labels
+present during conversion and can differ between generated repositories.
+
+#### Who Are the Annotators?
+
+See the upstream dataset documentation for annotation provenance. Annotator identities,
+agreement scores, and per-record confidence values are not included in this converted
+view.
+
+### Personal and Sensitive Information
+
+Although each image is a small glyph crop, labels and source identifiers link it back to a
+historical page that may contain personal names or other information about historical
+individuals. The converter performs no personal-information or sensitive-content audit.
+
+## Considerations for Using the Data
+
+### Social Impact of the Dataset
+
+Character-level recognition can improve transcription and access to Japanese historical
+collections. Predictions remain uncertain for rare, damaged, or context-dependent forms;
+using isolated predictions as authoritative readings can introduce errors into historical
+records. Human review and page context are important for high-stakes interpretation.
+
+### Discussion of Biases
+
+The class distribution follows the selected and annotated source books and is expected to
+be long-tailed. Preserved works, institutions, genres, periods, hands, print styles, and
+page conditions may be unevenly represented. PUA classes and rare variants can have very
+few samples. No demographic, geographic, genre, or class-wise performance audit is
+included.
+
+### Other Known Limitations
+
+- Only a `train` split is provided; counts describe the current generated revision.
+- Crops inherit annotation errors and may include neighboring marks, partial glyphs,
+  degradation, or background artifacts.
+- Crop dimensions vary, so models generally need an explicit resize/pad policy.
+- Isolated crops omit page and linguistic context needed to disambiguate many Kuzushiji
+  forms.
+- Random row-level splitting causes leakage because crops from the same page/book are
+  visually related; group splits by `book_id` or `source_image_id`.
+- Categories are imbalanced; accuracy alone can conceal poor rare-character performance.
+- PUA readings/notes are optional, and `category_id` is not guaranteed stable across
+  independently generated versions.
+
+## Additional Information
+
+### Dataset Curators
+
+The source collection is curated and processed by NIJL, other holding institutions, and
+CODH. This character-crop view is generated by the `kuzushiji-hf-converter` project;
+consult the repository history for maintainers of a particular published revision.
+
+### Licensing Information
+
+This generated dataset is distributed under
+[CC BY-SA 4.0](https://creativecommons.org/licenses/by-sa/4.0/). Users remain responsible
+for checking the upstream terms, providing attribution, indicating modifications, and
+applying ShareAlike requirements to adaptations. This card is not legal advice.
+
+### Citation Information
+
+Please cite the source dataset:
+
+```text
+『日本古典籍くずし字データセット』（国文研ほか所蔵／CODH加工）
+doi:10.20676/00000340
+```
+
+```text
+"Japanese Historical Character Dataset"
+(Owned by NIJL and others, Processed by CODH)
+doi:10.20676/00000340
+```
+
+When publishing a derived dataset or model, also cite the exact Hugging Face repository
+revision used (`{repo_id}`) so the generated schema and statistics can be reproduced.
+
+### Contributions and Acknowledgments
+
+Data is provided by the ROIS-DS Center for Open Data in the Humanities, the National
+Institute of Japanese Literature, and the other holding institutions credited by the
+upstream dataset.
 """
     return DatasetCard(content)
 

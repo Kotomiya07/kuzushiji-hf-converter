@@ -97,6 +97,20 @@ uv run python convert_dataset.py --dataset-type character --push-to-hub --hub-us
 `hf auth login` 済みなら、`HF_TOKEN` を明示しなくてもローカル保存済みトークンを自動利用します。明示したい場合は `--hub-token` または `HF_TOKEN` も使えます。
 `--hub-username` を省略した場合は、ログイン中ユーザー名を自動解決して `{username}/{dataset_name}` 形式で push します。
 
+### Dataset Card
+
+Hub へのアップロード時には、ページ単位・文字単位それぞれの Dataset Card を自動生成します。カードには次の内容が含まれます。
+
+- 変換時に集計した画像数、書籍数、文字カテゴリ数、データ分割
+- 対応タスク、言語、全フィールドの型と意味、利用例
+- COCO / YOLO bbox の定義と、列・セグメント注釈の扱い
+- 元データ、変換・アノテーション過程、アノテーター情報の範囲
+- PUA（私用領域文字）の扱いと補助メタデータ
+- 想定されるバイアス、データリーク、既知の制約、個人・機微情報への注意
+- ライセンス、引用情報、謝辞
+
+文字数に応じた Hugging Face の `size_categories` も自動設定されます。Dataset Card の統計はアップロード対象の変換結果から生成されるため、公開リビジョンごとの実データと一致します。
+
 ### 変換結果の bbox 可視化
 
 変換後の Dataset を使って、ページ画像上に以下の bbox を重ね描きして確認できます。
@@ -218,6 +232,27 @@ features = Features({
 - `output/kuzushiji-dataset-{形式}/` - ローカル保存時のデータセット
 - `output/kuzushiji-dataset-characters/` - 文字単位のクロップ画像データセット
 - `output/kuzushiji-dataset-roboflow-yolov8-columns/` - Roboflow 向け YOLOv8 データセット
+
+## PUA（私用領域文字）について
+
+本データセットのアノテーションには、Unicodeの標準文字だけでは表現できない字形のためにPUA（私用領域, U+E000〜）コードが使われている場合があります。
+
+代表的な例が「ヿ」（合字コト）です。字形・読みのバリエーションが4種類存在しますが、Unicodeに正規の文字が存在するのはカタカナ版（`U+30FF`）のみのため、残り3種はPUAコードで代用しています。
+
+| 文字 / コード | 種別 | is_pua | pua_reading |
+|---|---|---|---|
+| ヿ（`U+30FF`） | カタカナ「ヿ」（Unicode正規文字） | false | - |
+| `U+E009` | ひらがな「ヿ」 | true | こと |
+| `U+E00A` | ひらがな「ヿ」+濁点 | true | ごと |
+| `U+E00B` | カタカナ「ヿ」+濁点 | true | ゴト |
+
+学習に利用する際は、この4種類を
+
+- 同一の文字（「ヿ」）として統合する
+- 読み（こと/ごと/ゴト）が異なる別の文字として区別する
+- 学習対象から除外する
+
+のいずれかを、用途に応じて選択してください。`is_pua` / `pua_code` / `pua_reading` / `pua_memo` フィールドを使って判別・変換できます。
 
 ## データソース
 

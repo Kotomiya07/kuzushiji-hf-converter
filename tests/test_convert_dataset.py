@@ -480,6 +480,70 @@ def test_dataset_type_helpers() -> None:
     assert convert_dataset.should_generate_character_dataset("page") is False
 
 
+def test_get_size_category_covers_large_character_datasets() -> None:
+    assert convert_dataset.get_size_category(999) == "n<1K"
+    assert convert_dataset.get_size_category(1_000) == "1K<n<10K"
+    assert convert_dataset.get_size_category(100_000) == "100K<n<1M"
+    assert convert_dataset.get_size_category(1_000_000) == "1M<n<10M"
+
+
+def test_create_page_dataset_card_contains_detailed_standard_sections() -> None:
+    card = convert_dataset.create_dataset_card(
+        repo_id="example/kuzushiji-pages",
+        bbox_format="coco",
+        num_images=12_345,
+        num_books=35,
+        num_categories=4_321,
+    )
+    content = str(card)
+
+    assert "pretty_name: Kuzushiji Page Dataset (COCO)" in content
+    assert "# Dataset Card for Kuzushiji Page Dataset" in content
+    assert "## Dataset Summary" in content
+    assert "## Supported Tasks and Leaderboards" in content
+    assert "### Data Instances" in content
+    assert "### Data Fields" in content
+    assert "### Data Splits" in content
+    assert "| train | 12,345 |" in content
+    assert "## Dataset Creation" in content
+    assert "### Personal and Sensitive Information" in content
+    assert "## Considerations for Using the Data" in content
+    assert "### Discussion of Biases" in content
+    assert "### Other Known Limitations" in content
+    assert "## Additional Information" in content
+    assert "### Licensing Information" in content
+    assert "### Citation Information" in content
+
+
+def test_create_character_dataset_card_contains_detailed_standard_sections() -> None:
+    card = convert_dataset.create_character_dataset_card(
+        repo_id="example/kuzushiji-characters",
+        num_characters=123_456,
+        num_books=35,
+        num_categories=4_321,
+    )
+    content = str(card)
+
+    assert "pretty_name: Kuzushiji Character Dataset" in content
+    assert "size_categories:" in content
+    assert "- 100K<n<1M" in content
+    assert "# Dataset Card for Kuzushiji Character Dataset" in content
+    assert "## Dataset Summary" in content
+    assert "## Supported Tasks and Leaderboards" in content
+    assert "### Data Instances" in content
+    assert "### Data Fields" in content
+    assert "### Data Splits" in content
+    assert "| train | 123,456 |" in content
+    assert "## Dataset Creation" in content
+    assert "### Annotation Process" in content
+    assert "### Personal and Sensitive Information" in content
+    assert "## Considerations for Using the Data" in content
+    assert "### Discussion of Biases" in content
+    assert "### Other Known Limitations" in content
+    assert "## Additional Information" in content
+    assert "### Citation Information" in content
+
+
 def test_main_rejects_character_dataset_type_for_roboflow(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         sys,
