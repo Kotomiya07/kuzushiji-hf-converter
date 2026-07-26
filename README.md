@@ -71,6 +71,8 @@ uv run python convert_dataset.py --bbox-format yolo --raw-dir ./raw --column-ann
 
 文字単位 dataset の画像は `raw/*/characters/` を使わず、`raw/*/images/*.jpg` と `*_coordinate.csv` の bbox から毎回新規クロップします。画像サイズはリサイズせず、クロップ後の原寸をそのまま保持します。
 
+元データの bbox がページ画像の範囲を超えている場合、文字・列・セグメントのすべての bbox は読み込み時に画像境界（`0 <= x <= width`, `0 <= y <= height`）へクランプされます。データセットに含まれる bbox は常にページ内に収まります。
+
 ### Roboflow 向け YOLOv8 形式で書き出し
 
 ```bash

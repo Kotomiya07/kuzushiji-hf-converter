@@ -207,6 +207,66 @@ def test_load_annotations_derives_pua_info_from_unicode_column(tmp_path: Path) -
     assert char.pua_memo == "竹かんむりに車へん"
 
 
+def test_load_annotations_clamps_char_bbox_to_image_bounds(tmp_path: Path) -> None:
+    book_id = "book1"
+    images_dir = tmp_path / "raw" / book_id / "images"
+    images_dir.mkdir(parents=True)
+    image_path = images_dir / "page_001.jpg"
+    PILImage.new("RGB", (100, 200), color="white").save(image_path)
+
+    csv_path = tmp_path / "raw" / book_id / f"{book_id}_coordinate.csv"
+    pd.DataFrame(
+        [
+            {
+                "Image": "page_001",
+                "Unicode": "U+4E00",
+                "X": 90,
+                "Y": 180,
+                "Width": 20,
+                "Height": 40,
+                "Char ID": "C0001",
+                "Block ID": "",
+            },
+            {
+                "Image": "page_001",
+                "Unicode": "U+4E01",
+                "X": -5,
+                "Y": -3,
+                "Width": 20,
+                "Height": 40,
+                "Char ID": "C0002",
+                "Block ID": "",
+            },
+        ]
+    ).to_csv(csv_path, index=False)
+
+    annotations = convert_dataset.load_annotations(
+        csv_path,
+        images_dir,
+        book_id,
+        "coco",
+        None,
+        None,
+    )
+
+    chars = annotations[0].characters
+    assert (chars[0].x, chars[0].y, chars[0].width, chars[0].height) == (90, 180, 10, 20)
+    assert (chars[1].x, chars[1].y, chars[1].width, chars[1].height) == (0, 0, 15, 37)
+
+
+def test_build_bbox_from_frame_clamps_to_image_bounds() -> None:
+    df = pd.DataFrame(
+        [
+            {"X": -10, "Y": 20, "Width": 30, "Height": 40},
+            {"X": 180, "Y": 250, "Width": 40, "Height": 80},
+        ]
+    )
+
+    bbox = convert_dataset.build_bbox_from_frame(df, "coco", 200, 300)
+
+    assert bbox == [0.0, 20.0, 200.0, 280.0]
+
+
 def test_load_pua_metadata_reads_annotator_json(tmp_path: Path) -> None:
     metadata_path = tmp_path / "pua_characters.json"
     metadata_path.write_text(

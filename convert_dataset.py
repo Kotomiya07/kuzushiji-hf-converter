@@ -238,16 +238,24 @@ def build_bbox_from_frame(
     img_width: int,
     img_height: int,
 ) -> list[float]:
-    """DataFrame から外接矩形 bbox を作る."""
+    """DataFrame から外接矩形 bbox を作る（画像境界内にクランプする）."""
     x_min = int(df["X"].min())
     y_min = int(df["Y"].min())
     x_max = int((df["X"] + df["Width"]).max())
     y_max = int((df["Y"] + df["Height"]).max())
-    return convert_bbox(
+    left, top, right, bottom = clamp_bbox_to_image(
         x_min,
         y_min,
         x_max - x_min,
         y_max - y_min,
+        img_width,
+        img_height,
+    )
+    return convert_bbox(
+        left,
+        top,
+        right - left,
+        bottom - top,
         img_width,
         img_height,
         bbox_format,
@@ -433,12 +441,21 @@ def load_annotations(
             )
 
         pua_fields = build_pua_fields(str(row["Unicode"]), pua_metadata)
+        page = image_annotations[image_name]
+        left, top, right, bottom = clamp_bbox_to_image(
+            int(row["X"]),
+            int(row["Y"]),
+            int(row["Width"]),
+            int(row["Height"]),
+            page.width,
+            page.height,
+        )
         char_ann = CharAnnotation(
             unicode=row["Unicode"],
-            x=int(row["X"]),
-            y=int(row["Y"]),
-            width=int(row["Width"]),
-            height=int(row["Height"]),
+            x=left,
+            y=top,
+            width=right - left,
+            height=bottom - top,
             block_id=row["Block ID"],
             char_id=row["Char ID"],
             is_pua=bool(pua_fields["is_pua"]),
@@ -446,7 +463,7 @@ def load_annotations(
             pua_reading=str(pua_fields["pua_reading"]),
             pua_memo=str(pua_fields["pua_memo"]),
         )
-        image_annotations[image_name].characters.append(char_ann)
+        page.characters.append(char_ann)
 
     for image_name, annotation in image_annotations.items():
         columns, segments = page_level_annotations.get(image_name, ([], []))
@@ -1002,9 +1019,11 @@ character annotations.
 
 The converter reads each source page image and its coordinate CSV. It validates image
 availability, converts Unicode code points to display characters, assigns deterministic
-category IDs, and converts boxes to the selected COCO or YOLO representation. Column and
-segment boxes are derived as unions of their member character boxes when matching local
-annotation CSV files are supplied. The images themselves are not resized by this step.
+category IDs, and converts boxes to the selected COCO or YOLO representation. Boxes that
+extend beyond the page image are clamped to the image bounds, so every box in this
+repository lies within its page. Column and segment boxes are derived as unions of their
+member character boxes when matching local annotation CSV files are supplied. The images
+themselves are not resized by this step.
 
 Upstream source:
 
@@ -1235,7 +1254,7 @@ print(example["source_image_id"], example["crop_bbox"])
 | `pua_reading` | `string` | Optional reading imported from PUA metadata. |
 | `pua_memo` | `string` | Optional note imported from PUA metadata. |
 | `char` | `string` | Character obtained from the Unicode code point. |
-| `bbox` | 4 `int32` values | Original page coordinates `[x, y, width, height]`. |
+| `bbox` | 4 `int32` values | Page coordinates `[x, y, width, height]`, clamped to the image bounds. |
 | `crop_bbox` | 4 `int32` values | Boundary-clamped page coordinates actually used for cropping. |
 | `width`, `height` | `int32` | Resulting crop dimensions in pixels. |
 
